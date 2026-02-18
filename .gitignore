@@ -1,0 +1,8 @@
+.git-backup-*
+deploy.sh
+build/
+*.log
+.DS_Store
+*.xcuserstate
+xcuserdata/
+*.xcworkspace/xcuserdata/
