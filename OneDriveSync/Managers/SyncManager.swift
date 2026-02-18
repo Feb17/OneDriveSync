@@ -199,25 +199,15 @@ class SyncManager: ObservableObject {
         }
     }
     
-    /// Launch interactive OneDrive setup and return newly created remote name.
+    /// Run one-click OneDrive OAuth setup and return the created remote name.
     @discardableResult
     func quickSetupOneDrive() async -> String? {
-        let existingNames = Set(availableRemotes.map { $0.name })
+        let tempRemoteName = "onedrive_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8))"
         
         do {
-            try await rclone.configureNewOneDrive(name: "")
-            
-            // Poll for a newly created OneDrive remote from interactive config.
-            for _ in 0..<180 { // wait up to ~3 minutes
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                await refreshRemotes()
-                
-                if let newRemote = availableRemotes.first(where: { !existingNames.contains($0.name) }) {
-                    return newRemote.name
-                }
-            }
-            
-            return nil
+            try await rclone.configureNewOneDrive(name: tempRemoteName)
+            await refreshRemotes()
+            return availableRemotes.contains(where: { $0.name == tempRemoteName }) ? tempRemoteName : nil
         } catch {
             print("Failed to setup OneDrive: \(error)")
             return nil
@@ -686,10 +676,11 @@ class SyncManager: ObservableObject {
     /// Check for updates via GitHub API
     /// Returns: (isUpdateAvailable, latestVersion, releaseURL)
     func checkForUpdates() async throws -> (Bool, String, URL?) {
-        let url = URL(string: "https://api.github.com/repos/saihgupr/OneDriveSync/releases/latest")!
+        let url = URL(string: "https://api.github.com/repos/Feb17/OneDriveSync/releases/latest")!
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
-        request.setValue("OneDriveSync/1.0.1", forHTTPHeaderField: "User-Agent")
+        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+        request.setValue("OneDriveSync/\(currentVersion)", forHTTPHeaderField: "User-Agent")
         
         let (data, response) = try await URLSession.shared.data(for: request)
         
@@ -704,8 +695,6 @@ class SyncManager: ObservableObject {
         let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
         
         let latestVersion = release.tagName.replacingOccurrences(of: "v", with: "")
-        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
-        
         let isUpdateAvailable = compareVersions(latest: latestVersion, current: currentVersion)
         
         return (isUpdateAvailable, release.tagName, URL(string: release.htmlUrl))

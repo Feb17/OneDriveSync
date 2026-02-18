@@ -47,6 +47,55 @@ struct RcloneRemote: Identifiable, Equatable, Hashable {
 }
 
 actor RcloneWrapper {
+    private struct ConfigFlowResponse: Decodable {
+        let state: String
+        let option: ConfigOption?
+        let error: String
+        let result: String
+        
+        enum CodingKeys: String, CodingKey {
+            case state = "State"
+            case option = "Option"
+            case error = "Error"
+            case result = "Result"
+        }
+        
+        static let completed = ConfigFlowResponse(state: "", option: nil, error: "", result: "")
+        
+        init(state: String, option: ConfigOption?, error: String, result: String) {
+            self.state = state
+            self.option = option
+            self.error = error
+            self.result = result
+        }
+    }
+    
+    private struct ConfigOption: Decodable {
+        let name: String
+        let required: Bool
+        let type: String
+        let defaultStr: String
+        let valueStr: String
+        let examples: [ConfigOptionExample]?
+        
+        enum CodingKeys: String, CodingKey {
+            case name = "Name"
+            case required = "Required"
+            case type = "Type"
+            case defaultStr = "DefaultStr"
+            case valueStr = "ValueStr"
+            case examples = "Examples"
+        }
+    }
+    
+    private struct ConfigOptionExample: Decodable {
+        let value: String
+        
+        enum CodingKeys: String, CodingKey {
+            case value = "Value"
+        }
+    }
+    
     private let rclonePath: String
     private let runner = ProcessRunner.shared
     
@@ -108,27 +157,88 @@ actor RcloneWrapper {
         return allRemotes.filter { $0.type == "onedrive" }
     }
     
-    /// Opens Terminal to run interactive rclone config for OneDrive setup.
-    /// OneDrive requires additional post-OAuth selection (drive type/drive ID),
-    /// which `config create <name> onedrive` cannot reliably complete unattended.
+    /// Creates a OneDrive remote using rclone's non-interactive config flow.
+    /// This automatically opens a browser for Microsoft OAuth and accepts defaults
+    /// for post-auth backend questions.
     func configureNewOneDrive(name: String) async throws {
-        _ = name // Name is now chosen by user inside interactive `rclone config`.
-        let command = "\(rclonePath) config"
+        let remoteName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !remoteName.isEmpty else {
+            throw RcloneError.configurationFailed("Remote name cannot be empty")
+        }
         
-        // Open Terminal and run the command
-        let script = """
-        tell application "Terminal"
-            activate
-            do script "\(command)"
-        end tell
-        """
+        let existingNames = Set(try await listRemotes().map(\.name))
+        guard !existingNames.contains(remoteName) else {
+            throw RcloneError.configurationFailed("Remote '\(remoteName)' already exists")
+        }
         
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
+        var shouldCleanup = false
         
-        try process.run()
-        process.waitUntilExit()
+        do {
+            let createResult = try await runner.run(
+                rclonePath,
+                arguments: [
+                    "config", "create", remoteName, "onedrive",
+                    "region", "global",
+                    "--non-interactive"
+                ]
+            )
+            guard createResult.isSuccess else {
+                throw RcloneError.configurationFailed(createResult.stderr)
+            }
+            
+            shouldCleanup = true
+            var response = try decodeConfigFlowResponse(from: createResult.stdout)
+            var safetyCounter = 0
+            
+            while !response.state.isEmpty {
+                safetyCounter += 1
+                if safetyCounter > 30 {
+                    throw RcloneError.configurationFailed("OneDrive setup exceeded expected number of configuration steps")
+                }
+                
+                if !response.error.isEmpty, response.option == nil {
+                    throw RcloneError.configurationFailed(response.error)
+                }
+                
+                guard let option = response.option else {
+                    throw RcloneError.configurationFailed("Missing config prompt for state '\(response.state)'")
+                }
+                
+                let answer = try automaticAnswer(for: option)
+                let continueResult = try await runner.run(
+                    rclonePath,
+                    arguments: [
+                        "config", "update", remoteName,
+                        "--continue",
+                        "--non-interactive",
+                        "--state", response.state,
+                        "--result", answer
+                    ]
+                )
+                
+                guard continueResult.isSuccess else {
+                    throw RcloneError.configurationFailed(continueResult.stderr)
+                }
+                
+                response = try decodeConfigFlowResponse(from: continueResult.stdout)
+            }
+            
+            if !response.error.isEmpty {
+                throw RcloneError.configurationFailed(response.error)
+            }
+            
+            let verifyRemotes = try await listOneDriveRemotes()
+            guard verifyRemotes.contains(where: { $0.name == remoteName }) else {
+                throw RcloneError.configurationFailed("OneDrive remote '\(remoteName)' was not created")
+            }
+            
+            shouldCleanup = false
+        } catch {
+            if shouldCleanup {
+                _ = try? await runner.run(rclonePath, arguments: ["config", "delete", remoteName])
+            }
+            throw error
+        }
     }
     
     /// Opens Terminal to run interactive rclone config
@@ -146,6 +256,64 @@ actor RcloneWrapper {
         
         try process.run()
         process.waitUntilExit()
+    }
+    
+    private func decodeConfigFlowResponse(from output: String) throws -> ConfigFlowResponse {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .completed
+        }
+        
+        let jsonString: String
+        if trimmed.first == "{", trimmed.last == "}" {
+            jsonString = trimmed
+        } else if let start = trimmed.firstIndex(of: "{"),
+                  let end = trimmed.lastIndex(of: "}"),
+                  start < end {
+            jsonString = String(trimmed[start...end])
+        } else {
+            throw RcloneError.configurationFailed("Unexpected config response: \(trimmed)")
+        }
+        
+        guard let data = jsonString.data(using: .utf8) else {
+            throw RcloneError.configurationFailed("Invalid config response encoding")
+        }
+        
+        do {
+            return try JSONDecoder().decode(ConfigFlowResponse.self, from: data)
+        } catch {
+            throw RcloneError.configurationFailed("Unexpected config response: \(jsonString)")
+        }
+    }
+    
+    private func automaticAnswer(for option: ConfigOption) throws -> String {
+        switch option.name {
+        case "config_is_local":
+            return "true"
+        case "config_type":
+            return "onedrive"
+        case "config_token":
+            throw RcloneError.configurationFailed(
+                "Browser authentication did not complete. Please retry and finish Microsoft login in your browser."
+            )
+        default:
+            if !option.defaultStr.isEmpty {
+                return option.defaultStr
+            }
+            if !option.valueStr.isEmpty {
+                return option.valueStr
+            }
+            if let firstExample = option.examples?.first?.value, !firstExample.isEmpty {
+                return firstExample
+            }
+            if option.type == "bool" {
+                return "true"
+            }
+            if option.required {
+                throw RcloneError.configurationFailed("No default answer available for required option '\(option.name)'")
+            }
+            return ""
+        }
     }
     
     private func configFilePath() async throws -> String {

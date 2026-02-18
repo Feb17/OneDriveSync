@@ -469,7 +469,7 @@ struct AddAccountSheet: View {
             ProgressView()
                 .controlSize(.regular)
             
-            Text("Complete the setup flow in Terminal (browser auth + drive selection), then return here.")
+            Text("Your browser will open for Microsoft sign-in and authorization. Return here after approving access.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -533,17 +533,8 @@ struct AddAccountSheet: View {
         Task {
             if let tempName = await syncManager.quickSetupOneDrive() {
                 tempRemoteName = tempName
-                
-                // Poll for the remote to appear (user completing OAuth)
-                for _ in 0..<60 { // Wait up to 60 seconds
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    await syncManager.refreshRemotes()
-                    
-                    if syncManager.availableRemotes.contains(where: { $0.name == tempName }) {
-                        step = .naming
-                        return
-                    }
-                }
+                step = .naming
+                return
             }
             // If we get here, something went wrong
             dismiss()

@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.0.2 - 2026-02-18
+
+### 发布说明
+- `Connect OneDrive` 改为一键浏览器鉴权，不再要求用户进入 Terminal 手动执行 `rclone config`。
+- 新增版本包含 OneDrive 连接流程体验升级与发布链路修复。
+
+### 关键改动清单
+- OneDrive 连接体验：
+  - 使用 `rclone config create/update --non-interactive` 自动完成配置流程
+  - 自动处理配置状态机与默认选项，浏览器完成微软 OAuth 即可
+  - 连接流程失败时自动清理临时 remote，避免残留脏配置
+- 设置页交互调整：
+  - 连接提示从“回到 Terminal 完成配置”更新为“浏览器登录授权”
+  - 账户连接成功后直接进入命名步骤，移除冗余轮询等待
+- 更新检查修复：
+  - GitHub Release API 地址切换为 `Feb17/OneDriveSync`
+  - `User-Agent` 改为按当前 app 版本动态生成
+
+### 验收结果摘要
+- 已通过：Debug 构建、版本号提升、发布前代码编译检查。
+- 待线上验证：真实微软账号 OAuth 全链路与 release 拉取更新提示。
+
 ## v1.0.1 - 2026-02-18
 
 ### 发布说明
