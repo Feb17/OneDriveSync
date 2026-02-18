@@ -18,7 +18,7 @@ struct SyncFolder: Identifiable, Codable, Equatable {
     let id: UUID
     var localPath: String
     var remoteName: String      // e.g., "onedrive_personal"
-    var remotePath: String      // e.g., "Backups/YAML"
+    var remotePath: String      // e.g., "Backups/YAML", "/" for remote root, empty for auto folder name
     var lastSyncDate: Date?
     var lastSyncStatus: SyncStatus
     var isEnabled: Bool
@@ -48,10 +48,30 @@ struct SyncFolder: Identifiable, Codable, Equatable {
         URL(fileURLWithPath: localPath).lastPathComponent
     }
     
+    /// Resolved destination path on remote.
+    /// - Empty input means "use local folder name".
+    /// - "/" means remote root.
+    /// - Any other value is treated as a relative remote path.
+    var effectiveRemotePath: String {
+        let input = remotePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        if input == "/" {
+            return ""
+        }
+        
+        let cleaned = input.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if !cleaned.isEmpty {
+            return cleaned
+        }
+        
+        return URL(fileURLWithPath: localPath).lastPathComponent
+    }
+    
     var fullRemotePath: String {
-        if remotePath.isEmpty {
+        let path = effectiveRemotePath
+        if path.isEmpty {
             return "\(remoteName):"
         }
-        return "\(remoteName):\(remotePath)"
+        return "\(remoteName):\(path)"
     }
 }

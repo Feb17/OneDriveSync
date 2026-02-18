@@ -90,9 +90,11 @@ actor RcloneWrapper {
     
     private struct ConfigOptionExample: Decodable {
         let value: String
+        let help: String?
         
         enum CodingKeys: String, CodingKey {
             case value = "Value"
+            case help = "Help"
         }
     }
     
@@ -227,8 +229,8 @@ actor RcloneWrapper {
                 throw RcloneError.configurationFailed(response.error)
             }
             
-            let verifyRemotes = try await listOneDriveRemotes()
-            guard verifyRemotes.contains(where: { $0.name == remoteName }) else {
+            let verifyResult = try await runner.run(rclonePath, arguments: ["config", "show", remoteName])
+            guard verifyResult.isSuccess else {
                 throw RcloneError.configurationFailed("OneDrive remote '\(remoteName)' was not created")
             }
             
@@ -292,6 +294,23 @@ actor RcloneWrapper {
             return "true"
         case "config_type":
             return "onedrive"
+        case "config_driveid":
+            if let examples = option.examples, !examples.isEmpty {
+                if let oneDriveRoot = examples.first(where: { ($0.help ?? "").localizedCaseInsensitiveContains("OneDrive (personal)") }) {
+                    return oneDriveRoot.value
+                }
+                if let personalDrive = examples.first(where: { ($0.help ?? "").localizedCaseInsensitiveContains("(personal)") }) {
+                    return personalDrive.value
+                }
+                return examples[0].value
+            }
+            if !option.defaultStr.isEmpty {
+                return option.defaultStr
+            }
+            if !option.valueStr.isEmpty {
+                return option.valueStr
+            }
+            throw RcloneError.configurationFailed("No usable drive ID found during OneDrive setup")
         case "config_token":
             throw RcloneError.configurationFailed(
                 "Browser authentication did not complete. Please retry and finish Microsoft login in your browser."

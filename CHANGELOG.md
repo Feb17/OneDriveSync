@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.0.3 - 2026-02-19
+
+### 发布说明
+- 修复 OneDrive 连接后账号不显示的问题，并增强 OneDrive drive 选择稳定性。
+- 修复 `Destination Folder (optional)` 为空时的同步行为，避免卡在 `syncing`。
+- 统一 `Add Sync Folder` 与 `Edit Sync Folder` 的 UI 文案与提示。
+
+### 关键改动清单
+- OneDrive 账号接入修复：
+  - 连接后增加 remote 出现轮询，避免 OAuth 后配置写入延迟导致 UI 不刷新
+  - OneDrive `config_driveid` 自动优先选择 `OneDrive (personal)`，避免默认 drive_id 无效
+  - remote 创建校验从列表检测改为 `config show`，降低误回滚概率
+- 同步路径修复：
+  - `Destination Folder` 为空时，默认使用本地目录名作为远端目录
+  - 输入 `/` 时才表示同步到 OneDrive 根目录
+  - `open in OneDrive` 深链路径改为使用解析后的有效远端路径
+- 稳定性修复：
+  - 修复 `syncAll/syncFolder` 在数组变更场景下的 `Index out of range` 崩溃
+  - `launch at login` 仅在设置变化时更新，减少无效权限报错刷屏
+- UI 一致性：
+  - `Add/Edit Sync Folder` 的字段名和说明文案保持一致
+
+### 验收结果摘要
+- 已通过：Debug 构建、账号连接回显、路径规则编译验证、崩溃修复编译验证。
+
 ## v1.0.2 - 2026-02-18
 
 ### 发布说明

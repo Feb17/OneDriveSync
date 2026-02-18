@@ -294,7 +294,7 @@ struct AddFolderSheet: View {
                     TextField("Destination Folder (optional)", text: $remotePath)
                         .textFieldStyle(.roundedBorder)
                     
-                Text("Leave empty to sync to the root of your OneDrive.\nOr type a folder path (e.g. 'Backups/MyMac').")
+                    Text("Leave empty to use the local folder name on OneDrive.\nType a folder path (e.g. 'Backups/MyMac'), or '/' for OneDrive root.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -375,8 +375,12 @@ struct EditFolderSheet: View {
                         }
                     }
                     
-                    TextField("Remote Path", text: $remotePath)
+                    TextField("Destination Folder (optional)", text: $remotePath)
                         .textFieldStyle(.roundedBorder)
+                    
+                    Text("Leave empty to use the local folder name on OneDrive.\nType a folder path (e.g. 'Backups/MyMac'), or '/' for OneDrive root.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)
@@ -531,10 +535,21 @@ struct AddAccountSheet: View {
     
     private func startConnection() {
         Task {
+            await syncManager.checkRcloneInstallation()
+            
             if let tempName = await syncManager.quickSetupOneDrive() {
                 tempRemoteName = tempName
-                step = .naming
-                return
+                
+                // Poll for the remote to appear (OAuth + config propagation can be delayed).
+                for _ in 0..<60 {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    await syncManager.refreshRemotes()
+                    
+                    if syncManager.availableRemotes.contains(where: { $0.name == tempName }) {
+                        step = .naming
+                        return
+                    }
+                }
             }
             // If we get here, something went wrong
             dismiss()

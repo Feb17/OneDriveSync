@@ -84,6 +84,7 @@ class SyncManager: ObservableObject {
     private var syncTimer: Timer?
     private let userDefaultsKey = "OneDriveSync.Folders"
     private let settingsKey = "OneDriveSync.Settings"
+    private var lastAppliedLaunchAtLogin: Bool = false
     
     // MARK: - Initialization
     
@@ -101,6 +102,9 @@ class SyncManager: ObservableObject {
             let detectedPath = AppSettings.detectRclonePath() ?? AppSettings.defaultRclonePath
             self.settings = AppSettings(rclonePath: detectedPath)
         }
+        
+        // Track launch-at-login state to avoid re-registering on unrelated settings changes.
+        self.lastAppliedLaunchAtLogin = self.settings.launchAtLogin
         
         // Now initialize rclone with settings
         self.rclone = RcloneWrapper(rclonePath: self.settings.rclonePath)
@@ -147,8 +151,11 @@ class SyncManager: ObservableObject {
         // Update rclone wrapper with new path
         rclone = RcloneWrapper(rclonePath: settings.rclonePath)
         
-        // Update launch at login
-        updateLaunchAtLogin()
+        // Update launch at login only if the specific setting changed.
+        if settings.launchAtLogin != lastAppliedLaunchAtLogin {
+            updateLaunchAtLogin()
+            lastAppliedLaunchAtLogin = settings.launchAtLogin
+        }
         
         // Restart timer with new interval
         scheduleSync()
@@ -202,12 +209,21 @@ class SyncManager: ObservableObject {
     /// Run one-click OneDrive OAuth setup and return the created remote name.
     @discardableResult
     func quickSetupOneDrive() async -> String? {
-        let tempRemoteName = "onedrive_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8))"
+        let baseName = "_TempOneDrive"
+        var tempRemoteName = baseName
+        var counter = 1
+        
+        let existingNames = Set(availableRemotes.map { $0.name })
+        while existingNames.contains(tempRemoteName) {
+            counter += 1
+            tempRemoteName = "\(baseName)\(counter)"
+        }
         
         do {
             try await rclone.configureNewOneDrive(name: tempRemoteName)
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
             await refreshRemotes()
-            return availableRemotes.contains(where: { $0.name == tempRemoteName }) ? tempRemoteName : nil
+            return tempRemoteName
         } catch {
             print("Failed to setup OneDrive: \(error)")
             return nil
@@ -301,7 +317,7 @@ class SyncManager: ObservableObject {
     
     /// Open the folder in OneDrive web interface (best effort deep-link with fallback).
     func openFolderInOneDrive(_ folder: SyncFolder) async {
-        if let folderURL = await rclone.getWebLink(remote: folder.remoteName, path: folder.remotePath) {
+        if let folderURL = await rclone.getWebLink(remote: folder.remoteName, path: folder.effectiveRemotePath) {
             await MainActor.run {
                 _ = NSWorkspace.shared.open(folderURL)
             }
@@ -324,25 +340,37 @@ class SyncManager: ObservableObject {
     
     // MARK: - Sync Operations
     
+    private func indexForFolder(id: UUID) -> Int? {
+        folders.firstIndex(where: { $0.id == id })
+    }
+    
     func syncAll() async {
         guard !isSyncing else { return }
         
         isSyncing = true
+        let enabledFolderIDs = folders.filter(\.isEnabled).map(\.id)
         
-        for index in folders.indices where folders[index].isEnabled {
-            currentSyncFolder = folders[index]
-            folders[index].lastSyncStatus = .syncing
+        for folderID in enabledFolderIDs {
+            guard let startIndex = indexForFolder(id: folderID) else { continue }
+            
+            currentSyncFolder = folders[startIndex]
+            folders[startIndex].lastSyncStatus = .syncing
             
             // Check if cancelled before starting this folder
             if syncCancelled {
-                folders[index].lastSyncStatus = .idle
+                if let cancelIndex = indexForFolder(id: folderID) {
+                    folders[cancelIndex].lastSyncStatus = .idle
+                }
                 break
             }
             
+            let sourcePath = folders[startIndex].localPath
+            let destinationPath = folders[startIndex].fullRemotePath
+            
             do {
                 let result = try await rclone.sync(
-                    source: folders[index].localPath,
-                    destination: folders[index].fullRemotePath
+                    source: sourcePath,
+                    destination: destinationPath
                 ) { [weak self] progress in
                     Task { @MainActor in
                         self?.syncProgress = self?.simplifyProgress(progress) ?? progress
@@ -351,13 +379,17 @@ class SyncManager: ObservableObject {
                     }
                 }
                 
-                folders[index].lastSyncDate = Date()
-                folders[index].lastSyncStatus = result.success ? .success : .error
-                folders[index].lastError = nil
+                if let finishIndex = indexForFolder(id: folderID) {
+                    folders[finishIndex].lastSyncDate = Date()
+                    folders[finishIndex].lastSyncStatus = result.success ? .success : .error
+                    folders[finishIndex].lastError = nil
+                }
                 
             } catch {
-                folders[index].lastSyncStatus = .error
-                folders[index].lastError = error.localizedDescription
+                if let errorIndex = indexForFolder(id: folderID) {
+                    folders[errorIndex].lastSyncStatus = .error
+                    folders[errorIndex].lastError = error.localizedDescription
+                }
             }
         }
         
@@ -389,19 +421,20 @@ class SyncManager: ObservableObject {
     
     func syncFolder(_ folder: SyncFolder) async {
         guard !isSyncing else { return }
-        guard let index = folders.firstIndex(where: { $0.id == folder.id }) else { return }
+        guard let startIndex = indexForFolder(id: folder.id) else { return }
         
         isSyncing = true
-        currentSyncFolder = folder
-        folders[index].lastSyncStatus = .syncing
+        currentSyncFolder = folders[startIndex]
+        folders[startIndex].lastSyncStatus = .syncing
         
         // Resolve the actual local path (handling Volume-1 issues)
-        let resolvedPath = resolveLocalPath(folder.localPath)
+        let resolvedPath = resolveLocalPath(folders[startIndex].localPath)
+        let destinationPath = folders[startIndex].fullRemotePath
         
         do {
             let result = try await rclone.sync(
                 source: resolvedPath,
-                destination: folder.fullRemotePath
+                destination: destinationPath
             ) { [weak self] progress in
                 Task { @MainActor in
                     self?.syncProgress = self?.simplifyProgress(progress) ?? progress
@@ -409,13 +442,17 @@ class SyncManager: ObservableObject {
                 }
             }
             
-            folders[index].lastSyncDate = Date()
-            folders[index].lastSyncStatus = result.success ? .success : .error
-            folders[index].lastError = nil
+            if let finishIndex = indexForFolder(id: folder.id) {
+                folders[finishIndex].lastSyncDate = Date()
+                folders[finishIndex].lastSyncStatus = result.success ? .success : .error
+                folders[finishIndex].lastError = nil
+            }
             
         } catch {
-            folders[index].lastSyncStatus = .error
-            folders[index].lastError = error.localizedDescription
+            if let errorIndex = indexForFolder(id: folder.id) {
+                folders[errorIndex].lastSyncStatus = .error
+                folders[errorIndex].lastError = error.localizedDescription
+            }
         }
         
         currentSyncFolder = nil
